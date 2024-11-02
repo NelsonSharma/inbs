@@ -1,0 +1,1 @@
+print(f'MAIN [{__file__}]')
