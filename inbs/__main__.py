@@ -7,21 +7,30 @@ if __name__!='__main__': exit(f'[!] can not import {__name__}.{__file__}')
 
 import os, argparse, datetime, logging
 parser = argparse.ArgumentParser()
-parser.add_argument('--base',           type=str, default='', help="path to base dir"     )
-parser.add_argument('--home',           type=str, default='', help="home page under base directory"   )
+parser.add_argument('--base',           type=str, default='',                     help="path to base dir"     )
+parser.add_argument('--template',       type=str, default='lab',                  help="classic/lab/reveal"   )
+parser.add_argument('--title',          type=str, default='',                     help="to be used when empty title is found"   )
+parser.add_argument('--home',           type=str, default='',                     help="home page"   )
 
-parser.add_argument('--template',       type=str, default='lab', help="classic/lab/reveal"   )
-parser.add_argument('--no_script',      type=int, default=1, help="[-] if true, remove any embedded <script> tags")
-parser.add_argument('--dlink',          type=int, default=0, help="if true, shows a download link on each page except home page")
-parser.add_argument('--tlink',          type=int, default=0, help="if true, shows a top link on each page")
+parser.add_argument('--query_refresh',  type=str, default='!',              help="[-] # refresh ?!"         )
+parser.add_argument('--query_download', type=str, default='?',              help="[-] # download ??"        )
+parser.add_argument('--no_script',      type=int, default=1,                help="[-] if true, remove any embedded <script> tags")
+parser.add_argument('--dlink',          type=int, default=1,                help="if true, shows a download link on each page except home page")
+parser.add_argument('--dtext',          type=str, default='📥️',               help="text for download link"   )
+parser.add_argument('--dalign',          type=str, default='',               help="align for download link"   )
+parser.add_argument('--dafter',          type=int, default=0,                help="if true, shows download link after header")
+parser.add_argument('--tlink',           type=int, default=1,                help="if true, shows a top link on each page")
+parser.add_argument('--ttext',           type=str, default='🔝',               help="text for top link"   )
+parser.add_argument('--talign',          type=str, default='left',               help="align for top link"   )
 
-parser.add_argument('--log',            type=str, default='', help="log file name - keep empty for no logging")
+parser.add_argument('--ext',            type=str, default='.ipynb',         help="[-] extension for notebook files - case sensetive")
+parser.add_argument('--log',            type=str, default='',               help="log file name - keep empty for no logging")
 
-parser.add_argument('--host',           type=str, default='0.0.0.0', )
-parser.add_argument('--port',           type=str, default='8088', )
-parser.add_argument('--threads',        type=int, default=10, )
-parser.add_argument('--max_connect',    type=int, default=500,)
-parser.add_argument('--max_size',       type=str, default='1024MB')
+parser.add_argument('--host',           type=str, default='0.0.0.0',                                    )
+parser.add_argument('--port',           type=str, default='8888',                                       )
+parser.add_argument('--threads',        type=int, default=10,                                           )
+parser.add_argument('--max_connect',    type=int, default=500,                                          )
+parser.add_argument('--max_size',       type=str, default='1024MB',          help="size of http body"   )
 
 
 
@@ -72,8 +81,39 @@ def remove_tag(page, tag): # does not work on nested tags
         istop = page[istart:].find(fstop)
         page = f'{page[:istart]}{page[istart+istop+len(fstop):]}'
     return page
-    
-def nb2html(source_notebook, template_name, no_script, html_title=None, parsed_title=None, dlink=''):
+
+
+STYLE_CSS = """<style type="text/css">
+
+.btn_header {
+    background-color: #FFFFFF; 
+    margin: 0px 0px 0px 6px;
+    padding: 12px 6px 12px 6px;
+    border-style: solid;
+    border-width: thin;
+    border-color: #000000;
+    color: #000000;
+    font-weight: bold;
+    font-size: medium;
+    border-radius: 5px;
+}
+
+.btn_actions {
+    background-color: #FFFFFF; 
+    padding: 2px 2px 2px 2px;
+    margin: 5px 5px 5px 5px;
+    border-style: solid;
+    border-color: silver;
+    border-width: thin;
+    color: #000000;
+    font-weight: bold;
+    font-size: medium;
+    border-radius: 2px;
+
+}
+</style>
+"""
+def nb2html(source_notebook, template_name, no_script, html_title=None, parsed_title=None, dlink='', dtext='', dalign='', tlink='', ttext='', talign=''):
     if html_title is None: # auto infer
         html_title = os.path.basename(source_notebook)
         iht = html_title.rfind('.')
@@ -84,13 +124,29 @@ def nb2html(source_notebook, template_name, no_script, html_title=None, parsed_t
         if no_script: page = remove_tag(page, 'script') # force removing any scripts
     except: page = None
 
-    if dlink:
-        fstart, fstop = f'<body', f'>'
+    if dlink or tlink:
+        fstart = f'<body'
         istart = page.find(fstart)
         if istart<0: return None
-        istop = page[istart:].find(fstop)
-        ins = f'<a href="{dlink}?{app.config["query_download"]}">⬇️</a>'
-        page = f'{page[:istart+istop+len(fstop)]}{ins}{page[istart+istop+len(fstop):]}'
+        page = f'{page[:istart]}{STYLE_CSS}{page[istart:]}'
+    
+        if dlink:
+            fstart, fstop = f'<body', f'>'
+            istart = page.find(fstart)
+            if istart<0: return None
+            html_path = os.path.relpath(source_notebook, app.config['base'])
+            istop = page[istart:].find(fstop)
+            if app.config['dafter']:
+                ins = f'<div align="{dalign}"><span class="btn_header">{html_title} @ ./{html_path}</span><a class="btn_actions" href="{dlink}?{app.config["query_download"]}">{dtext}</a></div><br><hr>'
+            else:
+                ins = f'<div align="{dalign}"><a class="btn_actions" href="{dlink}?{app.config["query_download"]}">{dtext}</a><span class="btn_header">{html_title} @ ./{html_path}</span></div><br><hr>'
+            page = f'{page[:istart+istop+len(fstop)]}{ins}{page[istart+istop+len(fstop):]}'
+        if tlink:
+            fstart = f'</body'
+            istart = page.find(fstart)
+            if istart<0: return None
+            ins= f'<hr><br><div align="{talign}"><a class="btn_actions" href="{tlink}">{ttext}</a></div>'
+            page = f'{page[:istart]}{ins}{page[istart:]}'
 
 
     return  page
@@ -104,6 +160,13 @@ app = Flask(__name__)
 app.config['base'] = BASE
 app.config['template'] = parsed.template
 app.config['dlink'] = bool(parsed.dlink)
+app.config['dtext'] = parsed.dtext
+app.config['dafter'] = parsed.dafter
+app.config['dalign'] = parsed.dalign
+app.config['tlink'] = bool(parsed.tlink)
+app.config['ttext'] = parsed.ttext
+app.config['talign'] = parsed.talign
+
 app.config['home'] = f'{parsed.home}{parsed.ext}'
 app.config['title'] = parsed.title
 app.config['ext'] = parsed.ext # this is case sensetive
@@ -112,7 +175,7 @@ app.config['query_download'] = parsed.query_download
 app.config['no_script'] = bool(parsed.no_script)
 #app.config['cached'] = cached
 loaded_pages = dict()
-
+#print(app.config)
 
 #%% Routes Section
 
@@ -134,13 +197,24 @@ def route_home(query):
     requested = os.path.join(base, query) # Joining the base and the requested path
     if not ((os.path.isfile(requested)) and (not os.path.relpath(requested, base).startswith(base))): return abort(404)
     else:
-        if tosend: return send_file(requested)
+        if tosend: return send_file(requested, as_attachment=False)
         else:
             global loaded_pages
-            if (requested not in loaded_pages) or refresh: loaded_pages[requested] = nb2html(requested, app.config['template'], app.config['no_script'],  html_title=None, parsed_title=app.config['title'], dlink=((f'{request.base_url}' if app.config['dlink'] else '') if (showdlink) else ''))
-            #if  len(requested) > app.config['cached']: loaded_pages
-            return redirect(url_for('route_home', query=query)) if refresh else ( send_file(requested) if download else loaded_pages[requested])
-
+            if (requested not in loaded_pages) or refresh: 
+                loaded_pages[requested] = nb2html(
+                    requested, app.config['template'], 
+                    app.config['no_script'],  
+                    html_title=None, 
+                    parsed_title=app.config['title'], 
+                    dlink=((f'{request.base_url}' if app.config['dlink'] else '') if (showdlink) else ''), 
+                    dtext=app.config['dtext'], 
+                    dalign=app.config['dalign'],
+                    tlink=((f'#' if app.config['tlink'] else '') if (app.config['tlink']) else ''), 
+                    ttext=app.config['ttext'], 
+                    talign=app.config['talign'],
+                    )
+            return redirect(url_for('route_home', query=query)) if refresh else ( send_file(requested, as_attachment=True) if download else loaded_pages[requested])
+            # send_file(abs_path, as_attachment=("get" in request.args))
 #%% Server Section
 def endpoints(athost):
     if athost=='0.0.0.0':
@@ -163,7 +237,7 @@ serve(app,
     threads = parsed.threads,    
     connection_limit = parsed.max_connect,
     max_request_body_size = str2bytes(parsed.max_size),
-    #_quiet=True,
+    _quiet=True,
 )
 end_time = datetime.datetime.now()
 sprint('◉ stop server @ [{}]'.format(end_time))
