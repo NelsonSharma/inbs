@@ -3,45 +3,30 @@ from sys import exit
 if __name__!='__main__': exit(f'[!] can not import {__name__}.{__file__}')
 #-----------------------------------------------------------------------------------------
 
-#%% Global
-
+#%% Arg-parse
 import os, argparse, datetime, logging
+fnow = datetime.datetime.now
 parser = argparse.ArgumentParser()
 parser.add_argument('--base',           type=str, default='',                     help="path to base dir"     )
+parser.add_argument('--dir',            type=str, default='',                     help="path to base dir (alias to dir and preceeds over it)"     )
 parser.add_argument('--template',       type=str, default='lab',                  help="classic/lab/reveal"   )
 parser.add_argument('--title',          type=str, default='',                     help="to be used when empty title is found"   )
 parser.add_argument('--home',           type=str, default='',                     help="home page"   )
-
-parser.add_argument('--query_refresh',  type=str, default='!',              help="[-] # refresh ?!"         )
-parser.add_argument('--query_download', type=str, default='?',              help="[-] # download ??"        )
-parser.add_argument('--no_script',      type=int, default=1,                help="[-] if true, remove any embedded <script> tags")
-parser.add_argument('--dlink',          type=int, default=1,                help="if true, shows a download link on each page except home page")
+parser.add_argument('--no_script',      type=int, default=0,                help="[-] if true, remove any embedded <script> tags")
+parser.add_argument('--no_files',       type=int, default=0,                help="[-] if true, prevents downloading files - only notebooks")
 parser.add_argument('--dtext',          type=str, default='📥️',               help="text for download link"   )
-parser.add_argument('--dalign',          type=str, default='',               help="align for download link"   )
-parser.add_argument('--dafter',          type=int, default=0,                help="if true, shows download link after header")
-parser.add_argument('--tlink',           type=int, default=1,                help="if true, shows a top link on each page")
 parser.add_argument('--ttext',           type=str, default='🔝',               help="text for top link"   )
-parser.add_argument('--talign',          type=str, default='left',               help="align for top link"   )
-
-parser.add_argument('--ext',            type=str, default='.ipynb',         help="[-] extension for notebook files - case sensetive")
+parser.add_argument('--htext',           type=str, default='🏠',               help="text for home link"   )
+parser.add_argument('--header',          type=int, default=0,               help="shows text in the header"   )
 parser.add_argument('--log',            type=str, default='',               help="log file name - keep empty for no logging")
-
 parser.add_argument('--host',           type=str, default='0.0.0.0',                                    )
 parser.add_argument('--port',           type=str, default='8888',                                       )
 parser.add_argument('--threads',        type=int, default=10,                                           )
 parser.add_argument('--max_connect',    type=int, default=500,                                          )
 parser.add_argument('--max_size',       type=str, default='1024MB',          help="size of http body"   )
-
-
-
-
 parsed = parser.parse_args()
 
-BASE = os.path.abspath(parsed.base)
-if not os.path.isdir(BASE): exit(f'No directory found at {BASE}')
-
-
-# ------------------------------------------------------------------------------------------
+#%% Logging
 LOGFILE = f'{parsed.log}'
 if LOGFILE: 
 # ------------------------------------------------------------------------------------------
@@ -57,34 +42,20 @@ if LOGFILE:
         logger.addHandler(console_handler)
     except: exit(f'[!] Logging could not be setup at {LOGFILE}')
     def sprint(msg): logging.info(msg) 
-# ------------------------------------------------------------------------------------------
 else:
     def sprint(msg): print(msg) 
-# ------------------------------------------------------------------------------------------
 
-# ------------------------------------------------------------------------------------------
-#%% Definitions
-
-# import packages after all exit statements
-from nbconvert import HTMLExporter 
+#%% imports
+import nbconvert, os
+from bs4 import BeautifulSoup
 from flask import Flask, request, abort, redirect, url_for, send_file
 from waitress import serve
 
+#%% Common
 str2bytes_sizes = dict(BB=2**0, KB=2**10, MB=2**20, GB=2**30, TB=2**40)
 def str2bytes(size): return int(float(size[:-2])*str2bytes_sizes.get(size[-2:].upper(), 0))
 
-def remove_tag(page, tag): # does not work on nested tags
-    fstart, fstop = f'<{tag}', f'/{tag}>'
-    while True:
-        istart = page.find(fstart)
-        if istart<0: break
-        istop = page[istart:].find(fstop)
-        page = f'{page[:istart]}{page[istart+istop+len(fstop):]}'
-    return page
-
-
-STYLE_CSS = """<style type="text/css">
-
+style_actions = """
 .btn_header {
     background-color: #FFFFFF; 
     margin: 0px 0px 0px 6px;
@@ -109,80 +80,226 @@ STYLE_CSS = """<style type="text/css">
     font-weight: bold;
     font-size: medium;
     border-radius: 2px;
-
 }
-</style>
 """
-def nb2html(source_notebook, template_name, no_script, html_title=None, parsed_title=None, dlink='', dtext='', dalign='', tlink='', ttext='', talign=''):
-    if html_title is None: # auto infer
+
+def nb2html(source_notebook, target_page=None, html_title=None, 
+            template_name='lab', no_script=False, favicon=True, 
+            hlink='home', header=0, tlink='top', dlink='download', durl='#', align='left'):
+    # ==============================================================
+    if html_title is None:
         html_title = os.path.basename(source_notebook)
-        iht = html_title.rfind('.')
-        if not iht<0: html_title = html_title[:iht]
-        if not html_title: html_title = (parsed_title if parsed_title else os.path.basename(os.path.dirname(source_notebook)))
-    try:    
-        page, _ = HTMLExporter(template_name=template_name).from_file(source_notebook,  dict(  metadata = dict( name = f'{html_title}' )    )) 
-        if no_script: page = remove_tag(page, 'script') # force removing any scripts
-    except: page = None
-
-    if dlink or tlink:
-        fstart = f'<body'
-        istart = page.find(fstart)
-        if istart<0: return None
-        page = f'{page[:istart]}{STYLE_CSS}{page[istart:]}'
+        if html_title.lower().endswith(".ipynb"): html_title = html_title[:-6]
+    if target_page is None: target_page = f'{source_notebook}.html'
+    page, _ = nbconvert.HTMLExporter(template_name=template_name) \
+            .from_file(source_notebook, dict(metadata=dict(name = f'{html_title}')),) 
+    soup = BeautifulSoup(page, 'html.parser')
+    # ==============================================================
     
-        if dlink:
-            fstart, fstop = f'<body', f'>'
-            istart = page.find(fstart)
-            if istart<0: return None
-            html_path = os.path.relpath(source_notebook, app.config['base'])
-            istop = page[istart:].find(fstop)
-            if app.config['dafter']:
-                ins = f'<div align="{dalign}"><span class="btn_header">{html_title} @ ./{html_path}</span><a class="btn_actions" href="{dlink}?{app.config["query_download"]}">{dtext}</a></div><br><hr>'
-            else:
-                ins = f'<div align="{dalign}"><a class="btn_actions" href="{dlink}?{app.config["query_download"]}">{dtext}</a><span class="btn_header">{html_title} @ ./{html_path}</span></div><br><hr>'
-            page = f'{page[:istart+istop+len(fstop)]}{ins}{page[istart+istop+len(fstop):]}'
+    if no_script:
+        for script in soup.find_all('script'): script.decompose()  # Find all script tags and remove them
+    
+    if favicon:
+        link_tag = soup.new_tag('link')
+        link_tag['rel'] = 'icon'
+        link_tag['href'] = 'favicon.ico'
+        soup.head.insert(0, link_tag)
+
+    if tlink or hlink or dlink or header: 
+        style_tag = soup.new_tag('style')
+        style_tag['type'] = 'text/css'
+        style_tag.string = style_actions
+        soup.head.insert(0, style_tag)
+
+
+        if hlink or dlink or header:
+            ndiv = soup.new_tag('div')
+            ndiv['align'] = f'{align}'
+            html_string = ""
+            if hlink: html_string += f'<a class="btn_actions" href="/">{hlink}</a>' 
+            if dlink: html_string += f'<a class="btn_actions" href="{durl}">{dlink}</a>' 
+            if header: html_string += f'<span class="btn_header">{html_title} @ ./{os.path.relpath(source_notebook, app.config['base'])}</span>'
+            html_string += f'<br><hr>'
+            nstr = BeautifulSoup(html_string, 'html.parser')
+            ndiv.append(nstr) 
+            soup.body.insert(0, ndiv)
+
+
+
         if tlink:
-            fstart = f'</body'
-            istart = page.find(fstart)
-            if istart<0: return None
-            ins= f'<hr><br><div align="{talign}"><a class="btn_actions" href="{tlink}">{ttext}</a></div>'
-            page = f'{page[:istart]}{ins}{page[istart:]}'
+            ndiv = soup.new_tag('div')
+            ndiv['align'] = f'{align}'
+            html_string = f'<hr><a class="btn_actions" href="#">{tlink}</a><br>'
+            nstr = BeautifulSoup(html_string, 'html.parser')
+            ndiv.append(nstr) 
+            soup.body.append(ndiv)
+
+    # ==============================================================
+    final_page = soup.prettify()
+    if target_page:
+        with open(target_page, 'w') as f: f.write(final_page)
+    # ==============================================================
+    return final_page
+
+def new_notebook(title="Notebook", nbformat=4, nbformat_minor=2):
+    return '{"cells": [{"cell_type": "markdown","metadata": {},"source": [ "'+str(title)+'" ] } ], "metadata": { }, "nbformat": '+str(nbformat)+', "nbformat_minor": '+str(nbformat_minor)+'}'
 
 
-    return  page
+#%%
 
+FAVICON=[
+0,0,1,0,1,0,32,32,0,0,1,0,32,0,168,16,0,0,22,0,0,0,40,0,0,0,32,0,0,0,64,0,0,0,1,0,32,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,255,18,0,0,255,18,0,0,255,19,0,0,255,22,0,
+0,255,22,0,0,255,8,0,0,255,47,0,0,255,17,0,0,255,4,0,0,255,18,0,0,255,18,0,0,255,22,0,0,255,13,0,0,255,14,0,
+0,255,21,0,0,255,27,0,0,255,25,0,0,255,11,0,0,255,28,0,0,255,26,0,0,255,21,0,0,255,18,0,0,255,23,0,0,255,19,0,
+0,255,16,0,0,255,15,0,0,255,22,0,0,255,20,0,0,255,18,0,0,255,9,0,0,255,13,0,0,255,19,0,0,255,15,0,0,255,11,0,
+0,255,4,0,0,255,2,0,0,255,15,0,0,255,28,0,0,255,35,0,0,255,2,0,1,255,11,0,1,255,5,0,2,255,2,0,2,255,23,0,
+1,255,19,0,0,255,18,0,0,255,19,0,0,255,24,0,0,255,37,0,0,255,29,0,1,255,9,0,1,255,24,0,1,255,26,0,1,255,31,0,
+1,255,20,0,1,255,25,0,0,255,24,0,0,255,26,0,0,255,18,0,0,255,13,0,0,255,9,0,0,255,6,0,0,255,12,0,0,255,22,0,
+0,255,31,0,0,255,35,0,0,255,25,0,0,255,8,0,0,255,10,0,0,255,40,0,1,255,8,0,3,255,9,0,5,255,5,0,5,255,3,0,
+6,255,8,0,6,255,33,0,5,255,9,0,4,255,30,0,3,255,29,0,3,255,20,0,3,255,36,0,4,255,33,0,4,255,26,0,5,255,6,0,
+6,255,24,0,6,255,24,0,5,255,18,0,4,255,24,0,3,255,27,0,1,255,18,0,0,255,15,0,0,255,4,0,0,255,2,0,0,255,8,0,
+0,255,13,0,0,255,29,0,0,255,25,0,0,255,16,0,0,255,25,0,0,255,7,0,1,255,25,0,3,255,13,0,5,255,11,0,8,255,8,0,
+11,255,18,0,13,255,8,0,14,255,13,0,13,255,29,0,11,255,22,0,9,255,33,0,7,255,22,0,6,255,33,0,6,255,33,0,8,255,33,0,
+10,255,25,0,12,255,12,0,13,255,16,0,13,255,25,0,12,255,22,0,9,255,22,0,7,255,16,0,4,255,28,0,1,255,8,0,0,255,4,0,
+0,255,3,0,0,255,4,0,0,255,10,0,0,255,29,0,0,255,21,0,0,255,23,0,0,255,16,0,1,255,3,0,4,255,7,0,7,255,16,0,
+11,255,16,0,16,255,10,0,19,255,13,0,22,255,29,0,23,255,25,0,23,255,16,0,20,255,22,0,17,255,25,0,13,255,36,0,12,255,32,0,
+12,255,11,0,15,255,10,0,18,255,8,0,21,255,9,0,23,255,10,0,23,255,27,0,21,255,43,0,18,255,50,0,13,255,22,0,9,255,31,0,
+5,255,9,0,3,255,6,0,0,255,7,0,0,255,1,0,0,255,6,0,0,255,39,0,0,255,35,0,0,255,21,0,0,255,6,0,3,255,4,0,
+7,255,14,0,12,255,16,0,19,255,19,0,25,255,13,0,31,255,13,0,35,255,32,0,37,255,25,0,35,255,13,0,31,255,23,0,25,255,38,0,
+21,255,32,0,19,255,25,0,19,255,13,0,23,255,10,0,28,255,12,0,33,255,13,0,36,255,13,0,37,255,15,0,34,255,17,0,28,255,44,0,
+22,255,22,0,15,255,27,0,9,255,14,0,4,255,9,0,1,255,6,0,0,255,11,0,0,255,10,0,0,255,33,0,0,255,22,0,0,255,11,0,
+2,255,3,0,6,255,10,0,11,255,18,0,18,255,27,0,27,255,28,0,37,255,22,0,53,255,51,0,125,255,63,0,158,255,70,0,188,255,55,0,
+137,255,33,0,36,255,17,0,30,255,33,0,27,255,14,0,28,255,12,0,33,255,23,0,63,255,59,0,161,255,73,0,200,255,51,0,138,255,33,0,
+72,255,23,0,41,255,23,0,32,255,30,0,23,255,18,0,15,255,15,0,8,255,13,0,3,255,9,0,0,255,2,0,0,255,19,0,0,255,20,0,
+0,255,19,0,0,255,10,0,3,255,15,0,8,255,18,0,16,255,14,0,25,255,16,0,37,255,40,0,101,255,77,0,212,255,71,0,195,255,77,0,
+203,255,75,0,204,255,76,0,205,255,27,0,64,255,31,0,40,255,23,0,36,255,14,0,37,255,25,0,43,255,57,0,136,255,74,0,195,255,82,0,
+225,255,74,0,203,255,72,0,195,255,65,0,176,255,17,0,45,255,20,0,31,255,17,0,20,255,16,0,12,255,12,0,6,255,9,0,2,255,9,0,
+0,255,2,0,0,255,12,0,0,255,15,0,1,255,13,0,5,255,8,0,11,255,13,0,20,255,26,0,32,255,53,0,89,255,74,0,179,255,77,0,
+200,255,70,0,182,255,77,0,208,255,81,0,224,255,68,0,179,255,50,1,109,255,32,2,49,255,18,1,44,255,20,1,46,255,43,1,52,255,75,0,
+186,255,74,0,179,255,82,0,225,255,72,0,188,255,76,0,204,255,71,0,169,255,66,0,164,255,39,1,39,255,27,0,26,255,9,0,16,255,10,0,
+8,255,10,0,3,255,18,0,0,255,12,0,0,255,10,0,0,255,17,0,3,255,30,0,7,255,43,0,14,255,52,0,24,255,54,0,38,255,66,0,
+142,255,75,0,205,255,67,0,162,255,72,0,194,255,68,1,176,255,81,0,222,255,69,1,173,255,59,3,142,255,25,5,56,255,23,4,52,255,23,5,
+53,255,32,3,72,255,70,0,181,255,77,0,198,255,75,0,197,255,72,0,188,255,66,0,163,255,77,0,205,255,75,0,181,255,58,0,79,255,25,0,
+31,255,14,0,19,255,30,0,10,255,23,0,5,255,7,0,1,255,4,0,0,255,47,0,0,255,48,0,4,255,45,0,9,255,48,0,17,255,53,0,
+28,255,46,0,45,255,78,0,214,255,70,0,183,255,57,0,148,255,81,0,224,255,80,0,217,255,70,1,176,255,75,0,199,255,65,2,162,255,38,9,
+63,255,36,9,58,255,37,9,60,255,45,6,103,255,64,2,170,255,80,0,220,255,68,1,173,255,82,0,225,255,73,0,193,255,62,0,150,255,79,0,
+211,255,58,0,134,255,19,0,35,255,30,0,22,255,31,0,12,255,30,0,6,255,31,0,1,255,20,0,0,255,11,0,1,255,8,0,4,255,11,0,
+10,255,31,0,19,255,26,0,31,255,27,0,60,255,71,0,188,255,66,0,180,255,71,0,194,255,72,0,196,255,82,0,225,255,78,13,187,255,123,62,
+231,255,69,3,179,255,40,12,66,255,42,12,62,255,106,91,126,255,51,7,123,255,72,1,195,255,61,2,161,255,79,0,217,255,79,0,218,255,66,0,
+180,255,74,0,202,255,63,0,173,255,52,0,140,255,17,0,38,255,25,0,25,255,26,0,15,255,38,0,7,255,28,0,2,255,30,0,0,255,3,0,
+2,255,3,0,6,255,7,0,13,255,14,0,22,255,27,0,35,255,29,0,49,255,68,0,162,255,77,0,200,255,73,0,197,255,66,1,165,255,76,0,
+197,255,82,0,224,255,168,133,231,255,77,17,173,255,56,16,69,255,45,16,65,255,128,114,142,255,86,53,136,255,70,3,177,255,77,1,208,255,80,0,
+219,255,65,1,173,255,68,0,185,255,75,0,203,255,71,0,191,255,38,0,102,255,15,0,42,255,26,0,28,255,23,0,18,255,42,0,10,255,13,0,
+4,255,13,0,0,255,2,0,4,255,10,0,8,255,18,0,16,255,40,0,26,255,24,0,40,255,29,0,54,255,37,0,68,255,46,1,82,255,49,2,
+91,255,54,2,109,255,69,1,178,255,70,2,186,255,101,47,194,255,122,89,171,255,57,18,68,255,69,19,65,255,50,24,70,255,150,135,168,255,77,5,
+195,255,73,2,187,255,69,1,184,255,59,2,150,255,48,3,96,255,63,1,87,255,57,1,75,255,48,1,61,255,42,0,47,255,50,0,33,255,17,0,
+21,255,30,0,12,255,30,0,5,255,5,0,2,255,8,0,6,255,19,0,11,255,19,0,20,255,27,0,32,255,26,0,47,255,39,0,92,255,46,0,
+106,255,45,1,98,255,52,3,95,255,60,4,97,255,50,5,98,255,47,7,106,255,53,8,126,255,156,140,177,255,65,37,81,255,116,92,123,255,80,50,
+89,255,56,29,80,255,149,119,185,255,72,21,126,255,51,6,99,255,54,5,98,255,49,4,97,255,46,2,93,255,62,0,101,255,63,0,102,255,54,0,
+67,255,34,0,39,255,12,0,26,255,19,0,16,255,42,0,8,255,9,0,3,255,19,0,7,255,24,0,15,255,27,0,26,255,25,0,39,255,56,0,
+145,255,82,0,225,255,82,0,225,255,81,0,224,255,79,0,216,255,79,0,215,255,81,0,222,255,81,0,224,255,74,1,200,255,115,75,178,255,117,88,
+118,255,139,120,142,255,87,67,100,255,153,139,164,255,155,122,211,255,116,54,224,255,112,46,228,255,79,0,217,255,77,0,210,255,80,0,220,255,82,0,
+225,255,82,0,225,255,79,0,216,255,27,0,64,255,12,0,33,255,17,0,20,255,50,0,11,255,18,0,4,255,17,0,10,255,15,0,19,255,14,0,
+32,255,18,0,47,255,61,0,168,255,82,0,225,255,82,0,225,255,82,0,225,255,82,0,225,255,82,0,225,255,80,0,218,255,71,1,184,255,77,0,
+209,255,54,10,98,255,121,97,123,255,61,38,70,255,86,62,92,255,37,18,61,255,81,26,175,255,89,24,196,255,74,1,198,255,82,0,225,255,82,0,
+225,255,82,0,225,255,82,0,225,255,82,0,225,255,81,0,224,255,37,0,83,255,16,0,39,255,28,0,25,255,49,0,15,255,20,0,7,255,26,0,
+13,255,31,0,24,255,26,1,38,255,20,0,54,255,36,0,90,255,59,0,159,255,71,0,187,255,77,0,198,255,77,0,197,255,68,0,176,255,70,0,
+184,255,81,0,224,255,65,4,145,255,42,11,57,255,37,18,51,255,30,14,46,255,88,75,99,255,45,16,53,255,44,12,77,255,77,1,208,255,77,0,
+208,255,65,1,174,255,70,0,190,255,75,0,201,255,72,0,196,255,66,0,178,255,57,0,134,255,34,1,63,255,19,0,46,255,16,0,30,255,34,0,
+18,255,16,0,9,255,12,0,16,255,30,0,28,255,24,0,42,255,50,0,137,255,81,0,223,255,79,0,216,255,77,0,207,255,71,0,159,255,71,0,
+151,255,79,0,213,255,82,0,225,255,72,0,183,255,54,5,70,255,25,7,47,255,24,9,38,255,34,9,36,255,47,24,50,255,84,68,93,255,57,10,
+61,255,53,7,106,255,81,0,222,255,81,0,224,255,68,0,185,255,51,0,134,255,72,0,193,255,76,0,209,255,80,0,221,255,76,0,207,255,25,0,
+65,255,13,0,35,255,11,0,21,255,12,0,12,255,15,0,18,255,32,0,30,255,19,0,45,255,60,0,164,255,82,0,225,255,76,0,208,255,70,0,
+170,255,78,0,205,255,82,0,225,255,82,0,225,255,76,0,204,255,58,2,83,255,37,2,53,255,20,3,36,255,19,6,29,255,21,6,26,255,30,7,
+28,255,105,84,102,255,68,23,59,255,66,6,71,255,56,2,134,255,81,0,224,255,82,0,225,255,81,0,222,255,68,0,183,255,67,0,181,255,81,0,
+222,255,81,0,224,255,29,0,79,255,14,0,37,255,11,0,24,255,13,0,13,255,31,0,19,255,15,0,31,255,25,0,69,255,57,0,155,255,75,0,
+196,255,77,0,203,255,79,0,212,255,82,0,225,255,82,0,225,255,77,0,211,255,51,1,92,255,49,2,58,255,26,0,37,255,21,1,27,255,12,2,
+20,255,11,1,18,255,12,2,20,255,20,6,25,255,35,9,37,255,37,2,48,255,53,3,68,255,60,0,152,255,81,0,224,255,82,0,225,255,82,0,
+225,255,74,0,200,255,75,0,204,255,66,0,179,255,45,0,120,255,14,0,38,255,9,0,24,255,5,0,14,255,14,0,18,255,13,0,28,255,65,0,
+174,255,82,0,225,255,81,0,222,255,74,0,184,255,82,0,225,255,82,0,225,255,74,0,199,255,50,1,91,255,47,1,55,255,36,0,37,255,26,0,
+26,255,18,0,18,255,12,0,13,255,9,0,11,255,9,0,12,255,13,0,16,255,15,1,23,255,21,1,33,255,29,1,47,255,53,2,65,255,62,0,
+142,255,81,0,222,255,82,0,225,255,79,0,217,255,71,0,190,255,82,0,225,255,81,0,224,255,29,0,79,255,9,0,23,255,6,0,13,255,19,0,
+15,255,36,0,24,255,60,0,143,255,64,0,166,255,59,0,96,255,64,0,128,255,64,0,155,255,57,0,110,255,42,1,59,255,39,0,45,255,51,0,
+34,255,51,0,25,255,26,0,17,255,20,0,11,255,14,0,7,255,11,0,6,255,15,0,7,255,17,0,10,255,10,0,15,255,10,0,22,255,18,0,
+30,255,32,1,39,255,47,1,53,255,38,1,78,255,50,0,135,255,62,0,166,255,33,1,80,255,56,0,138,255,65,0,178,255,26,0,69,255,8,0,
+20,255,18,0,12,255,28,0,12,255,25,0,19,255,16,0,27,255,45,0,50,255,64,0,126,255,55,0,100,255,42,1,44,255,42,0,41,255,33,0,
+36,255,36,0,30,255,21,0,22,255,24,0,16,255,28,0,10,255,17,0,6,255,12,0,4,255,14,0,2,255,16,0,3,255,20,0,5,255,4,0,
+9,255,6,0,14,255,9,0,19,255,12,0,26,255,13,0,33,255,15,0,39,255,17,0,43,255,20,0,55,255,51,0,127,255,44,0,99,255,22,0,
+31,255,9,0,23,255,7,0,16,255,23,0,9,255,15,0,8,255,19,0,14,255,42,0,19,255,35,0,24,255,34,0,27,255,35,0,29,255,45,0,
+29,255,42,0,27,255,29,0,23,255,16,0,18,255,8,0,13,255,5,0,9,255,5,0,5,255,4,0,3,255,18,0,0,255,16,0,0,255,13,0,
+0,255,15,0,2,255,8,0,4,255,9,0,7,255,9,0,11,255,11,0,16,255,12,0,20,255,14,0,25,255,15,0,28,255,12,0,29,255,12,0,
+29,255,22,0,26,255,27,0,22,255,11,0,16,255,8,0,11,255,8,0,6,255,35,0,5,255,44,0,8,255,29,0,11,255,23,0,15,255,24,0,
+17,255,39,0,18,255,36,0,17,255,27,0,15,255,22,0,13,255,16,0,10,255,17,0,6,255,31,0,4,255,14,0,2,255,1,0,0,255,18,0,
+0,255,6,0,0,255,13,0,0,255,2,0,0,255,1,0,1,255,2,0,3,255,8,0,5,255,11,0,8,255,12,0,11,255,14,0,14,255,17,0,
+17,255,19,0,18,255,14,0,18,255,7,0,16,255,9,0,13,255,8,0,10,255,3,0,6,255,10,0,4,255,35,0,2,255,29,0,4,255,28,0,
+5,255,31,0,7,255,30,0,8,255,35,0,9,255,27,0,8,255,35,0,8,255,34,0,6,255,27,0,4,255,40,0,1,255,26,0,1,255,27,0,
+0,255,14,0,0,255,10,0,0,255,18,0,0,255,18,0,0,255,11,0,0,255,21,0,0,255,16,0,0,255,14,0,1,255,5,0,3,255,2,0,
+5,255,13,0,6,255,21,0,8,255,18,0,9,255,16,0,9,255,9,0,8,255,4,0,7,255,2,0,4,255,1,0,3,255,2,0,1,255,21,0,
+0,255,25,0,1,255,31,0,2,255,36,0,2,255,27,0,3,255,25,0,4,255,29,0,3,255,32,0,3,255,44,0,1,255,42,0,0,255,33,0,
+0,255,24,1,0,255,22,0,0,255,26,0,0,255,12,0,0,255,24,0,0,255,4,0,0,255,17,0,0,255,22,0,0,255,20,0,0,255,22,0,
+0,255,24,0,0,255,19,0,1,255,7,0,2,255,7,0,3,255,5,0,4,255,14,0,4,255,18,0,3,255,15,0,2,255,12,0,1,255,5,0,
+0,255,1,0,0,255,25,1,0,255,29,0,0,255,42,0,0,255,36,0,0,255,27,0,0,255,30,0,0,255,29,0,0,255,26,0,0,255,48,0,
+0,255,44,0,0,255,26,0,0,255,37,0,0,255,35,0,0,255,24,0,0,255,27,0,0,255,15,0,0,255,15,0,0,255,18,0,0,255,20,0,
+0,255,20,0,0,255,20,0,0,255,19,0,0,255,20,0,0,255,23,0,0,255,7,0,0,255,3,0,0,255,17,0,0,255,10,0,0,255,11,0,
+0,255,5,0,0,255,9,0,0,255,11,0,0,255,28,0,0,255,18,0,0,255,27,0,0,255,28,0,0,255,34,0,0,255,33,0,0,255,23,0,
+0,255,26,0,0,255,45,0,0,255,30,0,0,255,32,0,0,255,20,0,0,255,17,0,0,255,25,0,0,255,26,0,0,255,25,0,0,255,19,0,
+0,255,20,0,0,255,21,0,0,255,21,0,0,255,14,0,0,255,8,0,0,255,12,0,0,255,19,0,0,255,21,0,0,255,3,0,0,255,12,0,
+0,255,13,0,0,255,7,0,0,255,32,0,0,255,43,0,0,255,41,0,0,255,47,0,0,255,33,0,0,255,26,0,0,255,27,0,0,255,28,0,
+0,255,19,0,0,255,26,0,0,255,24,0,0,255,29,0,0,255,26,0,0,255,17,0,0,255,14,0,0,255,11,0,0,255,11,0,0,255,17,0,
+0,255,27,0,0,255,20,0,0,255,15,0,0,255,22,0,0,255,42,0,0,255,39,0,0,255,22,0,0,255,2,0,0,255,4,0,0,255,18,0,
+0,255,19,0,0,255,9,0,0,255,17,0,0,255,18,0,0,255,40,0,0,255,29,0,0,255,31,0,0,255,34,0,0,255,29,0,0,255,25,0,
+0,255,24,0,0,255,10,0,0,255,17,0,0,255,21,0,0,255,24,0,0,255,24,0,0,255,17,0,0,255,10,0,0,255,2,0,0,255,5,0,
+0,255,8,0,0,255,8,0,0,255,17,0,0,255,30,0,0,255,34,0,0,255,23,0,0,255,30,0,0,255,17,0,0,255,27,0,0,255,23,0,
+0,255,8,0,0,255,5,0,0,255,20,0,0,255,23,0,0,255,22,0,0,255,18,0,0,255,26,0,0,255,25,0,0,255,25,0,0,255,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+]
 
 #%% App Setup 
 
-sprint(f'⇒ Serving from directory {BASE}')
+BASE = os.path.abspath(parsed.base)
+if parsed.dir: BASE = os.path.abspath(parsed.dir)
+try: os.makedirs(BASE, exist_ok=True)
+except: 
+    sprint(f'No directory found at {BASE}, using current directory...')
+    BASE = os.path.abspath(os.getcwd())
 
-app = Flask(__name__)
+with open( os.path.join( BASE, f"favicon.ico") , 'wb') as f: f.write((b''.join([i.to_bytes() for i in FAVICON])))
+
+sprint(f'⇒ Serving from directory {BASE}')
+EXT = ".ipynb"
+HOME = f'{parsed.home}{EXT}'
+HOME_PATH = os.path.join(BASE, HOME)
+if not os.path.isfile(HOME_PATH):
+    try: 
+        with open(HOME_PATH, 'w') as f: f.write(new_notebook(parsed.title))
+    except: exit(f'The home page at {HOME_PATH} was not found and could not be created.')
+if not os.path.isfile(HOME_PATH): exit(f'Home page "{HOME}" not found at {HOME_PATH}.')
+
+app = Flask(__name__, static_folder=BASE, template_folder=BASE)
 app.config['base'] = BASE
 app.config['template'] = parsed.template
-app.config['dlink'] = bool(parsed.dlink)
 app.config['dtext'] = parsed.dtext
-app.config['dafter'] = parsed.dafter
-app.config['dalign'] = parsed.dalign
-app.config['tlink'] = bool(parsed.tlink)
 app.config['ttext'] = parsed.ttext
-app.config['talign'] = parsed.talign
-
-app.config['home'] = f'{parsed.home}{parsed.ext}'
+app.config['htext'] = parsed.htext
+app.config['header'] = int(parsed.header)
+app.config['home'] = HOME
 app.config['title'] = parsed.title
-app.config['ext'] = parsed.ext # this is case sensetive
-app.config['query_refresh'] = parsed.query_refresh 
-app.config['query_download'] = parsed.query_download 
+app.config['ext'] = EXT
+app.config['query_refresh'] = "!"
+app.config['query_download'] = "?"
 app.config['no_script'] = bool(parsed.no_script)
-#app.config['cached'] = cached
+app.config['no_files'] = bool(parsed.no_files)
+
 loaded_pages = dict()
-#print(app.config)
 
 #%% Routes Section
 
 @app.route('/', methods =['GET'], defaults={'query': ''})
 @app.route('/<path:query>')
 def route_home(query):
-    
     refresh = app.config['query_refresh'] in request.args
     download = app.config['query_download'] in request.args
     base, ext, home = app.config['base'], app.config['ext'], app.config['home']
@@ -190,31 +307,40 @@ def route_home(query):
     
     if ('.' in os.path.basename(query)):    tosend = (not query.lower().endswith(ext))
     else:                                   query += ext #---> auto add extension
-    if ext==query: 			    query=home
+    if ext==query: 			                query=home
+
     showdlink = not((query==home) or (query==ext))
     sprint (f'{"🔸" if showdlink else "🔹"} {request.remote_addr} [{request.method}] {request.url}')
 
     requested = os.path.join(base, query) # Joining the base and the requested path
     if not ((os.path.isfile(requested)) and (not os.path.relpath(requested, base).startswith(base))): return abort(404)
     else:
-        if tosend: return send_file(requested, as_attachment=False)
+        if tosend: return abort(403) if app.config['no_files'] else send_file(requested, as_attachment=False) 
         else:
             global loaded_pages
             if (requested not in loaded_pages) or refresh: 
                 loaded_pages[requested] = nb2html(
-                    requested, app.config['template'], 
-                    app.config['no_script'],  
-                    html_title=None, 
-                    parsed_title=app.config['title'], 
-                    dlink=((f'{request.base_url}' if app.config['dlink'] else '') if (showdlink) else ''), 
-                    dtext=app.config['dtext'], 
-                    dalign=app.config['dalign'],
-                    tlink=((f'#' if app.config['tlink'] else '') if (app.config['tlink']) else ''), 
-                    ttext=app.config['ttext'], 
-                    talign=app.config['talign'],
-                    )
-            return redirect(url_for('route_home', query=query)) if refresh else ( send_file(requested, as_attachment=True) if download else loaded_pages[requested])
-            # send_file(abs_path, as_attachment=("get" in request.args))
+                    requested, 
+                    target_page=None, 
+                    html_title=app.config['title'] if not showdlink else None, 
+                    template_name=app.config['template'], 
+                    no_script=False, 
+                    favicon=True, 
+                    tlink=app.config['ttext'], 
+                    dlink=app.config['dtext'] if showdlink else None, 
+                    hlink = app.config['htext'] if showdlink else None,
+                    header = app.config['header'] if showdlink else None,
+                    durl=f"{request.base_url}?{app.config['query_download']}", 
+                    align='left')
+                
+            if refresh: return redirect(url_for('route_home', query=query))
+            else:
+                if download: return send_file(requested, as_attachment=True) #<--- downloading ipynbs
+                else: return  loaded_pages[requested]
+
+
+            
+            
 #%% Server Section
 def endpoints(athost):
     if athost=='0.0.0.0':
@@ -227,7 +353,7 @@ def endpoints(athost):
         return ips
     else: return [f'{athost}']
 
-start_time = datetime.datetime.now()
+start_time = fnow()
 sprint('◉ start server @ [{}]'.format(start_time))
 for endpoint in endpoints(parsed.host): sprint(f'◉ http://{endpoint}:{parsed.port}')
 serve(app,
@@ -239,7 +365,7 @@ serve(app,
     max_request_body_size = str2bytes(parsed.max_size),
     _quiet=True,
 )
-end_time = datetime.datetime.now()
+end_time = fnow()
 sprint('◉ stop server @ [{}]'.format(end_time))
 sprint('◉ server up-time was [{}]'.format(end_time - start_time))
 
