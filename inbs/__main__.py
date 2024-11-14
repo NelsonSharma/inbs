@@ -5,7 +5,7 @@ if __name__!='__main__': exit(f'[!] can not import {__name__}.{__file__}')
 
 #%% Arg-parse
 import os, argparse, datetime, logging
-fnow = datetime.datetime.now
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--base',           type=str, default='',                     help="path to base dir"     )
 parser.add_argument('--dir',            type=str, default='',                     help="path to base dir (alias to dir and preceeds over it)"     )
@@ -83,14 +83,13 @@ style_actions = """
 }
 """
 
-def nb2html(source_notebook, target_page=None, html_title=None, 
+def nb2html(source_notebook, html_title=None, 
             template_name='lab', no_script=False, favicon=True, 
             hlink='home', header=0, tlink='top', dlink='download', durl='#', align='left'):
     # ==============================================================
     if html_title is None:
         html_title = os.path.basename(source_notebook)
         if html_title.lower().endswith(".ipynb"): html_title = html_title[:-6]
-    if target_page is None: target_page = f'{source_notebook}.html'
     page, _ = nbconvert.HTMLExporter(template_name=template_name) \
             .from_file(source_notebook, dict(metadata=dict(name = f'{html_title}')),) 
     soup = BeautifulSoup(page, 'html.parser')
@@ -135,11 +134,9 @@ def nb2html(source_notebook, target_page=None, html_title=None,
             soup.body.append(ndiv)
 
     # ==============================================================
-    final_page = soup.prettify()
-    if target_page:
-        with open(target_page, 'w') as f: f.write(final_page)
+    # final_page = soup.prettify()
     # ==============================================================
-    return final_page
+    return soup.prettify()
 
 def new_notebook(title="Notebook", nbformat=4, nbformat_minor=2):
     return '{"cells": [{"cell_type": "markdown","metadata": {},"source": [ "'+str(title)+'" ] } ], "metadata": { }, "nbformat": '+str(nbformat)+', "nbformat_minor": '+str(nbformat_minor)+'}'
@@ -321,7 +318,6 @@ def route_home(query):
             if (requested not in loaded_pages) or refresh: 
                 loaded_pages[requested] = nb2html(
                     requested, 
-                    target_page=None, 
                     html_title=app.config['title'] if not showdlink else None, 
                     template_name=app.config['template'], 
                     no_script=False, 
@@ -344,16 +340,18 @@ def route_home(query):
 #%% Server Section
 def endpoints(athost):
     if athost=='0.0.0.0':
-        import socket
         ips=set()
-        for info in socket.getaddrinfo(socket.gethostname(), None):
-            if (info[0].name == socket.AddressFamily.AF_INET.name): ips.add(info[4][0])
+        try:
+            import socket
+            for info in socket.getaddrinfo(socket.gethostname(), None):
+                if (info[0].name == socket.AddressFamily.AF_INET.name): ips.add(info[4][0])
+        except: pass
         ips=list(ips)
         ips.extend(['127.0.0.1', 'localhost'])
         return ips
     else: return [f'{athost}']
 
-start_time = fnow()
+start_time = datetime.datetime.now()
 sprint('◉ start server @ [{}]'.format(start_time))
 for endpoint in endpoints(parsed.host): sprint(f'◉ http://{endpoint}:{parsed.port}')
 serve(app,
@@ -365,7 +363,7 @@ serve(app,
     max_request_body_size = str2bytes(parsed.max_size),
     _quiet=True,
 )
-end_time = fnow()
+end_time = datetime.datetime.now()
 sprint('◉ stop server @ [{}]'.format(end_time))
 sprint('◉ server up-time was [{}]'.format(end_time - start_time))
 
