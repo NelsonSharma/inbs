@@ -63,3 +63,4 @@ python -m inbs --base=/home/user/base --title="Notebook Server" --home=home --ho
 
 * To refresh the notebook after making changes, the server must be forced to convert the notebook to HTML again and update its cache. This can be done by appending `?!` to the url of the notebook that is to be refreshed. After refreshing, it will continue to server the new HTML page from the cache untill refreshed again.
 
+* The cache has no limits, so it will consume RAM based on the number of new pages visited. The cache can be cleared by appending `?~` to the home url like `http://127.0.0.0:8888/?~`
