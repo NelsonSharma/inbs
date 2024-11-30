@@ -112,7 +112,7 @@ def nb2html(source_notebook, html_title=None,
             html_string = ""
             if hlink: html_string += f'<a class="btn_actions" href="/">{hlink}</a>' 
             if dlink: html_string += f'<a class="btn_actions" href="{durl}">{dlink}</a>' 
-            if header: html_string += f'<span class="btn_header">{html_title} @ ./{os.path.relpath(source_notebook, app.config['base'])}</span>'
+            if header: html_string += f'<span class="btn_header">{html_title} @ ./{os.path.relpath(source_notebook, app.config["base"])}</span>'
             html_string += f'<br><hr>'
             nstr = BeautifulSoup(html_string, 'html.parser')
             ndiv.append(nstr) 
